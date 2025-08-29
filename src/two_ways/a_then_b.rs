@@ -13,26 +13,28 @@ pub mod manual {
         pin::{pin, Pin},
         task::Poll,
     };
+    use std::task::ready;
 
     use pin_project::pin_project;
 
     pub async fn a_then_b<A: Future<Output = ()>, B: Future<Output = ()>>(a: A, b: B) {
-        let state = State::default();
-        DoAThenB { state, a, b }.await
+        DoAThenB {
+            state: State::PendingA(a),
+            b,
+        }
+        .await
     }
 
-    #[derive(Clone, Copy, Default)]
-    enum State {
-        #[default]
-        DoingA,
-        DoingB,
+    #[pin_project(project = StateProj)]
+    enum State<A> {
+        PendingA(#[pin] A),
+        ReadyA,
     }
 
     #[pin_project]
     struct DoAThenB<A, B> {
-        state: State,
         #[pin]
-        a: A,
+        state: State<A>,
         #[pin]
         b: B,
     }
@@ -41,16 +43,18 @@ pub mod manual {
         type Output = ();
 
         fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-            let this = self.project();
-            match this.state {
-                State::DoingA => {
-                    if this.a.poll(cx).is_ready() {
-                        // TODO: drop a?
-                        *this.state = State::DoingB;
+            let mut this = self.project();
+            loop {
+                match this.state.as_mut().project() {
+                    StateProj::PendingA(a) => {
+                        ready!(a.poll(cx));
+                        this.state.set(State::ReadyA);
                     }
-                    Poll::Pending
+                    StateProj::ReadyA => {
+                        ready!(this.b.poll(cx));
+                        break Poll::Ready(());
+                    }
                 }
-                State::DoingB => this.b.poll(cx),
             }
         }
     }
