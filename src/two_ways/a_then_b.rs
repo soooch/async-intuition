@@ -12,7 +12,7 @@ pub mod manual {
         future::Future,
         mem::MaybeUninit,
         pin::Pin,
-        task::{ready, Context, Poll},
+        task::{Context, Poll, ready},
     };
 
     use pin_project::pin_project;
@@ -83,7 +83,7 @@ pub mod manual_opt {
         hint::unreachable_unchecked,
         mem::MaybeUninit,
         pin::Pin,
-        task::{ready, Context, Poll},
+        task::{Context, Poll, ready},
     };
 
     use pin_project::pin_project;

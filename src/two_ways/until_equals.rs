@@ -18,7 +18,7 @@ pub mod auto {
 pub mod manual {
     use core::{
         future::Future,
-        pin::{pin, Pin},
+        pin::{Pin, pin},
         task::Poll,
     };
 
