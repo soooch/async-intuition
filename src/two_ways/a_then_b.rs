@@ -1,6 +1,4 @@
 pub mod auto {
-    use core::future::Future;
-
     pub async fn a_then_b<A: Future<Output = ()>, B: Future<Output = ()>>(a: A, b: B) {
         a.await;
         b.await
@@ -9,13 +7,12 @@ pub mod auto {
 
 pub mod manual {
     use core::{
-        future::Future,
-        mem::MaybeUninit,
+        mem::ManuallyDrop,
         pin::Pin,
         task::{Context, Poll, ready},
     };
 
-    use pin_project::pin_project;
+    use pin_project::{pin_project, pinned_drop};
 
     pub fn a_then_b<A: Future<Output = ()>, B: Future<Output = ()>>(
         a: A,
@@ -24,12 +21,12 @@ pub mod manual {
         DoAThenB::new(a, b)
     }
 
-    #[pin_project(project = DoAThenBProj)]
+    #[pin_project(project = DoAThenBProj, PinnedDrop)]
     enum DoAThenB<A, B> {
         DoingA {
             #[pin]
             a: A,
-            b: MaybeUninit<B>,
+            b: ManuallyDrop<B>,
         },
         DoingB {
             #[pin]
@@ -42,7 +39,7 @@ pub mod manual {
         pub fn new(a: A, b: B) -> Self {
             Self::DoingA {
                 a,
-                b: MaybeUninit::new(b),
+                b: ManuallyDrop::new(b),
             }
         }
     }
@@ -56,10 +53,9 @@ pub mod manual {
                 match this {
                     DoAThenBProj::DoingA { a, b } => {
                         ready!(a.poll(cx));
-                        // SAFETY: b is initialized in `DoAThenB::new`. We read
-                        // it only once then drop the `MaybeUninit` by setting
-                        // the state to `DoingB`.
-                        let b = unsafe { MaybeUninit::assume_init_read(b) };
+                        // SAFETY: we drop the `ManuallyDrop` right after
+                        // taking from it, so `b` is only read once.
+                        let b = unsafe { ManuallyDrop::take(b) };
                         self.set(DoAThenB::DoingB { b });
                     }
                     DoAThenBProj::DoingB { b } => {
@@ -74,19 +70,32 @@ pub mod manual {
             }
         }
     }
+
+    #[pinned_drop]
+    impl<A, B> PinnedDrop for DoAThenB<A, B> {
+        fn drop(self: Pin<&mut Self>) {
+            let this = self.project();
+            match this {
+                // SAFETY: we immediately change states after taking from the
+                // `ManuallyDrop`, so `b` must be initialized.
+                DoAThenBProj::DoingA { a: _, b } => unsafe { ManuallyDrop::drop(b) },
+                DoAThenBProj::DoingB { b: _ } => (),
+                DoAThenBProj::Done => (),
+            }
+        }
+    }
 }
 
 /// This version attempts to use tail calls to avoid looping in `poll`.
 pub mod manual_opt {
     use core::{
-        future::Future,
         hint::unreachable_unchecked,
         mem::MaybeUninit,
         pin::Pin,
         task::{Context, Poll, ready},
     };
 
-    use pin_project::pin_project;
+    use pin_project::{pin_project, pinned_drop};
 
     pub fn a_then_b<A: Future<Output = ()>, B: Future<Output = ()>>(
         a: A,
@@ -95,7 +104,7 @@ pub mod manual_opt {
         DoAThenB::new(a, b)
     }
 
-    #[pin_project(project = DoAThenBProj)]
+    #[pin_project(project = DoAThenBProj, PinnedDrop)]
     enum DoAThenB<A, B> {
         DoingA {
             #[pin]
@@ -173,6 +182,21 @@ pub mod manual_opt {
             ready!(b.poll(cx));
             self.set(DoAThenB::Done);
             Poll::Ready(())
+        }
+    }
+
+    #[pinned_drop]
+    impl<A, B> PinnedDrop for DoAThenB<A, B> {
+        fn drop(self: Pin<&mut Self>) {
+            let this = self.project();
+            match this {
+                // SAFETY: we immediately change states after reading from the
+                // `MaybeUninit`, so `b` must be initialized.
+                DoAThenBProj::DoingA { a: _, b } => unsafe { b.assume_init_drop() },
+                // a is uninitialized in this state.
+                DoAThenBProj::DoingB { a: _, b: _ } => (),
+                DoAThenBProj::Done => (),
+            }
         }
     }
 }
